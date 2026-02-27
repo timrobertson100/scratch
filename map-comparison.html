@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GBIF Map Comparison</title>
+  <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 16px;
+      background: #1a6640;
+      color: white;
+      flex-shrink: 0;
+    }
+
+    #header h1 { font-size: 1.1rem; white-space: nowrap; }
+
+    #search-form { display: flex; gap: 8px; flex: 1; max-width: 500px; }
+
+    #search-input {
+      flex: 1;
+      padding: 7px 10px;
+      border: none;
+      border-radius: 4px;
+      font-size: 0.95rem;
+    }
+
+    #search-btn {
+      padding: 7px 16px;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+
+    #search-btn:hover { background: #388E3C; }
+
+    #panes {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      border-right: 2px solid #ccc;
+    }
+
+    .pane:last-child { border-right: none; }
+
+    .pane-header {
+      padding: 8px 14px;
+      background: #f5f5f5;
+      border-bottom: 1px solid #ddd;
+      flex-shrink: 0;
+    }
+
+    .pane-header h2 { font-size: 0.85rem; color: #555; margin-bottom: 5px; }
+
+    .species-info { font-size: 0.88rem; color: #333; min-height: 1.2em; }
+    .species-info .sci-name { font-weight: bold; font-style: italic; font-size: 0.95rem; }
+    .species-info .taxon-key { color: #777; font-size: 0.8rem; }
+    .species-info .taxon-meta { color: #555; font-size: 0.8rem; margin-top: 2px; }
+    .species-info .no-match { color: #cc3300; font-style: italic; }
+
+    .map-container { flex: 1; position: relative; }
+
+    .maplibregl-map { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>GBIF Map Comparison</h1>
+  <div id="search-form">
+    <input id="search-input" type="text" placeholder="Scientific name, e.g. Puma concolor" value="Puma concolor">
+    <button id="search-btn">Search</button>
+  </div>
+</div>
+
+<div id="panes">
+  <div class="pane">
+    <div class="pane-header">
+      <h2>Default Taxonomy (GBIF Backbone)</h2>
+      <div class="species-info" id="info-left">Enter a name above and click Search.</div>
+    </div>
+    <div class="map-container" id="map-left"></div>
+  </div>
+  <div class="pane">
+    <div class="pane-header">
+      <h2>Checklist: <span id="checklist-label"></span></h2>
+      <div class="species-info" id="info-right">Enter a name above and click Search.</div>
+    </div>
+    <div class="map-container" id="map-right"></div>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// CONFIGURATION — edit this section to change API endpoints, keys, and styles
+// =============================================================================
+
+const SPECIES_API    = 'https://api.gbif-test.org/v2/species/match';
+const CHECKLIST_KEY  = '7ddf754f-d193-4cc9-b351-99906754a03b';
+
+const OCCURRENCE_API = 'https://api.gbif.org/v2/map/occurrence/density';
+const OCCURRENCE_BIN         = 'hex';   // 'hex' | 'square' | '' (dot)
+const OCCURRENCE_HEX_PER_TILE = 117;    // Hex grid density
+
+// Paint style for the occurrence fill layer.
+// 'total' is the feature property containing the occurrence count.
+const OCCURRENCE_FILL_PAINT = {
+  'fill-color': [
+    'interpolate', ['linear'], ['get', 'total'],
+    1,    'rgba(255, 255, 153, 0.55)',
+    10,   'rgba(255, 178, 0,   0.65)',
+    100,  'rgba(230, 76,  0,   0.78)',
+    1000, 'rgba(165, 0,   38,  0.90)'
+  ],
+  'fill-outline-color': 'rgba(0,0,0,0.08)'
+};
+
+// Base map vector tile source and layers.
+const BASE_MAP_TILES = 'https://tile.gbif.org/3857/omt/{z}/{x}/{y}.pbf';
+const BASE_MAP_MAX_ZOOM = 14;
+const BASE_MAP_ATTRIBUTION = '© <a href="https://www.gbif.org">GBIF</a> | © <a href="https://openmaptiles.org">OpenMapTiles</a> | © <a href="https://openstreetmap.org">OpenStreetMap contributors</a>';
+
+// Base map layer paint styles — edit to change the look of the base map.
+const BASE_LAYERS = [
+  // Ocean / background
+  { id: 'background',        type: 'background', paint: { 'background-color': '#c9dff0' } },
+
+  // Land is implied by the background; water overwrites it
+  { id: 'water',             type: 'fill', sourceLayer: 'water',
+    paint: { 'fill-color': '#c9dff0', 'fill-outline-color': '#aabfd0' } },
+
+  // Land cover
+  { id: 'landcover-grass',   type: 'fill', sourceLayer: 'landcover',
+    filter: ['match', ['get', 'class'], ['grass', 'farmland', 'farmyard'], true, false],
+    paint: { 'fill-color': '#e0ead0', 'fill-opacity': 0.6 } },
+  { id: 'landcover-wood',    type: 'fill', sourceLayer: 'landcover',
+    filter: ['match', ['get', 'class'], ['wood', 'forest'], true, false],
+    paint: { 'fill-color': '#b8d4a0', 'fill-opacity': 0.7 } },
+  { id: 'landcover-glacier', type: 'fill', sourceLayer: 'landcover',
+    filter: ['==', 'subclass', 'glacier'],
+    paint: { 'fill-color': '#e8f4fc', 'fill-opacity': 0.8 } },
+
+  // Waterways
+  { id: 'waterway',          type: 'line', sourceLayer: 'waterway',
+    paint: { 'line-color': '#aabfd0', 'line-width': 1 } },
+
+  // Country boundaries (admin level 2)
+  { id: 'boundary-country',  type: 'line', sourceLayer: 'boundary',
+    filter: ['all', ['==', 'admin_level', 2], ['!has', 'claimed_by']],
+    paint: { 'line-color': '#888888',
+             'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.5, 6, 1.5] } },
+
+  // State/province boundaries (admin level 4), visible from zoom 4
+  { id: 'boundary-state',    type: 'line', sourceLayer: 'boundary',
+    filter: ['==', 'admin_level', 4], minzoom: 4,
+    paint: { 'line-color': '#bbbbbb', 'line-width': 0.7, 'line-dasharray': [3, 2] } }
+];
+
+// =============================================================================
+// END OF CONFIGURATION
+// =============================================================================
+
+document.getElementById('checklist-label').textContent = CHECKLIST_KEY;
+
+// Build the MapLibre style object from the BASE_LAYERS config above.
+function buildBaseStyle() {
+  const layers = BASE_LAYERS.map(function(l) {
+    const layer = { id: l.id, type: l.type, paint: l.paint };
+    if (l.sourceLayer) {
+      layer.source       = 'openmaptiles';
+      layer['source-layer'] = l.sourceLayer;
+    }
+    if (l.filter)   layer.filter  = l.filter;
+    if (l.minzoom)  layer.minzoom = l.minzoom;
+    return layer;
+  });
+
+  return {
+    version: 8,
+    sources: {
+      openmaptiles: {
+        type: 'vector',
+        tiles: [BASE_MAP_TILES],
+        maxzoom: BASE_MAP_MAX_ZOOM,
+        attribution: BASE_MAP_ATTRIBUTION
+      }
+    },
+    layers: layers
+  };
+}
+
+// Initialise both maps.
+let mapLeft, mapRight;
+let syncing = false;
+
+function initMaps() {
+  const style = buildBaseStyle();
+
+  mapLeft  = new maplibregl.Map({ container: 'map-left',  style: style, center: [0, 20], zoom: 1 });
+  mapRight = new maplibregl.Map({ container: 'map-right', style: structuredClone(style), center: [0, 20], zoom: 1 });
+
+  // Keep both maps in sync.
+  function sync(src, dst) {
+    if (syncing) return;
+    syncing = true;
+    dst.jumpTo({ center: src.getCenter(), zoom: src.getZoom(), bearing: src.getBearing(), pitch: src.getPitch() });
+    syncing = false;
+  }
+  mapLeft.on('move',  function() { sync(mapLeft,  mapRight); });
+  mapRight.on('move', function() { sync(mapRight, mapLeft);  });
+}
+
+// Build the occurrence tile URL.
+function occurrenceUrl(taxonKey, checklistKey) {
+  const params = 'taxonKey=' + taxonKey +
+    (OCCURRENCE_BIN          ? '&bin='         + OCCURRENCE_BIN          : '') +
+    (OCCURRENCE_HEX_PER_TILE ? '&hexPerTile='  + OCCURRENCE_HEX_PER_TILE : '') +
+    (checklistKey            ? '&checklistKey=' + checklistKey            : '');
+  return OCCURRENCE_API + '/{z}/{x}/{y}.mvt?' + params;
+}
+
+// Add (or replace) the occurrence overlay on a map.
+function setOccurrenceLayer(map, taxonKey, checklistKey) {
+  if (!taxonKey) return;
+
+  function addLayers() {
+    if (map.getLayer('occurrence-fill')) map.removeLayer('occurrence-fill');
+    if (map.getSource('occurrence'))     map.removeSource('occurrence');
+
+    map.addSource('occurrence', {
+      type: 'vector',
+      tiles: [occurrenceUrl(taxonKey, checklistKey)],
+      minzoom: 0,
+      maxzoom: 16
+    });
+
+    map.addLayer({
+      id: 'occurrence-fill',
+      type: 'fill',
+      source: 'occurrence',
+      'source-layer': 'occurrence',
+      paint: OCCURRENCE_FILL_PAINT
+    });
+  }
+
+  if (map.isStyleLoaded()) {
+    addLayers();
+  } else {
+    map.once('load', addLayers);
+  }
+}
+
+// Render species info and return the taxon key (or null).
+// Handles the v2 API response shape: { usage: {...}, diagnostics: {...} }
+function renderInfo(elId, data) {
+  const el = document.getElementById(elId);
+
+  const usage      = data && data.usage;
+  const matchType  = data && data.diagnostics && data.diagnostics.matchType;
+
+  if (!usage || !usage.key || matchType === 'NONE') {
+    el.innerHTML = '<span class="no-match">No match found.</span>';
+    return null;
+  }
+
+  const name      = usage.canonicalName || usage.name || '—';
+  const key       = usage.key;
+  const rank      = usage.rank    ? usage.rank.charAt(0)    + usage.rank.slice(1).toLowerCase()    : '';
+  const status    = usage.status  ? usage.status.charAt(0)  + usage.status.slice(1).toLowerCase()  : '';
+  const matchStr  = matchType     ? matchType.charAt(0)      + matchType.slice(1).toLowerCase()     : '';
+
+  el.innerHTML =
+    '<div class="sci-name">'    + name + '</div>' +
+    '<div class="taxon-key">Key: ' + key + '</div>' +
+    '<div class="taxon-meta">' +
+      [rank, status, matchStr ? 'match: ' + matchStr : ''].filter(Boolean).join(' · ') +
+    '</div>';
+
+  return key;
+}
+
+// Run a search.
+async function search(name) {
+  document.getElementById('info-left').textContent  = 'Searching…';
+  document.getElementById('info-right').textContent = 'Searching…';
+
+  const enc = encodeURIComponent(name);
+  try {
+    const [left, right] = await Promise.all([
+      fetch(SPECIES_API + '?scientificName=' + enc).then(function(r) { return r.json(); }),
+      fetch(SPECIES_API + '?scientificName=' + enc + '&checklistKey=' + CHECKLIST_KEY).then(function(r) { return r.json(); })
+    ]);
+
+    const keyLeft  = renderInfo('info-left',  left);
+    const keyRight = renderInfo('info-right', right);
+
+    setOccurrenceLayer(mapLeft,  keyLeft,  null);
+    setOccurrenceLayer(mapRight, keyRight, CHECKLIST_KEY);
+  } catch (err) {
+    document.getElementById('info-left').textContent  = 'Error: ' + err.message;
+    document.getElementById('info-right').textContent = 'Error: ' + err.message;
+  }
+}
+
+// Wire up UI.
+document.getElementById('search-btn').addEventListener('click', function() {
+  const name = document.getElementById('search-input').value.trim();
+  if (name) search(name);
+});
+
+document.getElementById('search-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    const name = e.target.value.trim();
+    if (name) search(name);
+  }
+});
+
+initMaps();
+</script>
+</body>
+</html>
