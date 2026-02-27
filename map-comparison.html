@@ -274,25 +274,29 @@ function setOccurrenceLayer(map, taxonKey, checklistKey) {
 }
 
 // Render species info and return the taxon key (or null).
+// Handles the v2 API response shape: { usage: {...}, diagnostics: {...} }
 function renderInfo(elId, data) {
   const el = document.getElementById(elId);
 
-  if (!data || data.matchType === 'NONE' || !data.usageKey) {
+  const usage      = data && data.usage;
+  const matchType  = data && data.diagnostics && data.diagnostics.matchType;
+
+  if (!usage || !usage.key || matchType === 'NONE') {
     el.innerHTML = '<span class="no-match">No match found.</span>';
     return null;
   }
 
-  const name      = data.canonicalName || data.scientificName || '—';
-  const key       = data.usageKey;
-  const rank      = data.rank      ? data.rank.charAt(0) + data.rank.slice(1).toLowerCase() : '';
-  const status    = data.status    ? data.status.charAt(0) + data.status.slice(1).toLowerCase() : '';
-  const matchType = data.matchType ? data.matchType.charAt(0) + data.matchType.slice(1).toLowerCase() : '';
+  const name      = usage.canonicalName || usage.name || '—';
+  const key       = usage.key;
+  const rank      = usage.rank    ? usage.rank.charAt(0)    + usage.rank.slice(1).toLowerCase()    : '';
+  const status    = usage.status  ? usage.status.charAt(0)  + usage.status.slice(1).toLowerCase()  : '';
+  const matchStr  = matchType     ? matchType.charAt(0)      + matchType.slice(1).toLowerCase()     : '';
 
   el.innerHTML =
     '<div class="sci-name">'    + name + '</div>' +
     '<div class="taxon-key">Key: ' + key + '</div>' +
     '<div class="taxon-meta">' +
-      [rank, status, matchType ? 'match: ' + matchType : ''].filter(Boolean).join(' · ') +
+      [rank, status, matchStr ? 'match: ' + matchStr : ''].filter(Boolean).join(' · ') +
     '</div>';
 
   return key;
